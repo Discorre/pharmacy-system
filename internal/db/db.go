@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	connStr = "postgres://discorre:0412@localhost:5432/pharmacy?sslmode=disable"
+	connStr = "postgres://user1:@pharmacy-system_db_1:5432/pharmacy?sslmode=disable"
 )
 
 func ConnectDB() (*sql.DB, error) {
