@@ -47,6 +47,28 @@ func main() {
 	r.HandleFunc("/api/users/{id}", handlers.DeleteUserWithDetails).Methods("DELETE")
 	r.HandleFunc("/api/users", handlers.GetAllUsersWithDetails).Methods("GET")
 
+	// Маршруты для аутентификации и авторизации
+	r.HandleFunc("/api/users/login", handlers.LoginUser).Methods("POST")
+
+	// Доступ к таблицам аптек и лекарств
+	r.HandleFunc("/api/pharmacies", handlers.RoleMiddleware("Seller", handlers.GetPharmacies)).Methods("GET")
+	r.HandleFunc("/api/pharmacies/{id:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.GetPharmacyByID)).Methods("GET")
+
+	// Только для создания, обновления и удаления
+	r.HandleFunc("/api/pharmacies", handlers.RoleMiddleware("Seller", handlers.CreatePharmacy)).Methods("POST")
+	r.HandleFunc("/api/pharmacies/{id:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.UpdatePharmacy)).Methods("PUT")
+	r.HandleFunc("/api/pharmacies/{id:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.DeletePharmacy)).Methods("DELETE")
+
+	// Управление лекарствами доступно только для Seller и Developer
+	r.HandleFunc("/api/medicines", handlers.RoleMiddleware("Seller", handlers.GetMedicines)).Methods("GET")
+	r.HandleFunc("/api/medicines/{Aid:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.GetMedicineByID)).Methods("GET")
+	r.HandleFunc("/api/medicines", handlers.RoleMiddleware("Seller", handlers.CreateMedicine)).Methods("POST")
+	r.HandleFunc("/api/medicines/{id:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.UpdateMedicine)).Methods("PUT")
+	r.HandleFunc("/api/medicines/{id:[0-9]+}", handlers.RoleMiddleware("Seller", handlers.DeleteMedicine)).Methods("DELETE")
+
+
+
+
 	log.Println("API сервер запущен на порту 8080...")
 	log.Fatal(http.ListenAndServe(":8080", handlers.EnableCORS(r)))
 }

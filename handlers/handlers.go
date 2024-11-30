@@ -48,6 +48,7 @@ type UserWithDetails struct {
 	ID        int           `json:"id"`
 	Username  string        `json:"username"`
 	Password  string        `json:"password"`
+	Cookie	  string    	`json:"cookie"`
 	CreatedAt time.Time     `json:"created_at"`
 	Details   UserDetails   `json:"details"`
 }
@@ -61,6 +62,20 @@ type UserDetails struct {
 	PhoneNumber string `json:"phone_number"`
 	Position    string `json:"position"`
 }
+
+// LoginRequest структура для получения данных из тела запроса
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// LoginResponse структура для отправки данных клиенту
+type LoginResponse struct {
+	Message string `json:"message"`
+	Token   string `json:"token,omitempty"`
+}
+
+
 
 func EnableCORS(h http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,11 +118,26 @@ func hashPassword(password string) (string, error) {
 	return string(bytes), err
 }
 
-// Создание нового пользователя с деталями
-func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
-	var userWithDetails UserWithDetails
-	err := json.NewDecoder(r.Body).Decode(&userWithDetails)
-	if err != nil {
+// Функция для проверки валидности позиции
+func isValidPosition(position string) bool {
+	validPositions := []string{"Developer", "Seller", "Buyer"}
+	for _, pos := range validPositions {
+		if position == pos {
+			return true
+		}
+	}
+	return false
+}
+
+// LoginUser обрабатывает вход пользователя
+func LoginUser(w http.ResponseWriter, r *http.Request) {
+	var credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	// Чтение JSON из запроса
+	if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
 		return
 	}
@@ -119,10 +149,97 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
+	var user UserWithDetails
+
+	// Получение данных пользователя из базы
+	err = db.QueryRow("SELECT u.id, u.username, u.password, u.cookie, ud.position FROM users u JOIN user_details ud ON u.id = ud.user_id WHERE u.username = $1",
+		credentials.Username).Scan(&user.ID, &user.Username, &user.Password, &user.Cookie, &user.Details.Position)
+	if err != nil {
+		http.Error(w, `{"message": "Invalid username or password"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// Проверка пароля
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(credentials.Password)); err != nil {
+		http.Error(w, `{"message": "Invalid username or password"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// Сохранение cookie на клиенте
+	http.SetCookie(w, &http.Cookie{
+		Name:     "auth_token",
+		Value:    user.Cookie,
+		HttpOnly: true,
+		Expires:  time.Now().Add(24 * time.Hour),
+	})
+
+	// Возврат роли и данных пользователя
+	response := map[string]interface{}{
+		"id":       user.ID,
+		"username": user.Username,
+		"position": user.Details.Position,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func RoleMiddleware(requiredPosition string, handler http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        cookie, err := r.Cookie("auth_token")
+        if err != nil {
+            http.Error(w, `{"message": "Unauthorized"}`, http.StatusUnauthorized)
+            return
+        }
+
+        db, err := ConnectToDB()
+        if err != nil {
+            http.Error(w, `{"message": "Database error"}`, http.StatusInternalServerError)
+            return
+        }
+        defer db.Close()
+
+        var userPosition string
+        err = db.QueryRow("SELECT ud.position FROM users u JOIN user_details ud ON u.id = ud.user_id WHERE u.cookie = $1", cookie.Value).Scan(&userPosition)
+        if err != nil {
+            http.Error(w, `{"message": "Invalid user session"}`, http.StatusUnauthorized)
+            return
+        }
+
+        if userPosition != requiredPosition && (requiredPosition != "Seller" || userPosition != "Buyer") {
+            http.Error(w, `{"message": "Forbidden"}`, http.StatusForbidden)
+            return
+        }
+
+        handler(w, r)
+    }
+}
+
+
+func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
+	var userWithDetails UserWithDetails
+	err := json.NewDecoder(r.Body).Decode(&userWithDetails)
+	if err != nil {
+		http.Error(w, `{"message": "Invalid input"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Проверка на валидность позиции
+	if !isValidPosition(userWithDetails.Details.Position) {
+		http.Error(w, `{"message": "Invalid position"}`, http.StatusBadRequest)
+		return
+	}
+
+	db, err := ConnectToDB()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"message": "Error connecting to DB: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
 	// Хэширование пароля
 	hashedPassword, err := hashPassword(userWithDetails.Password)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error hashing password: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"message": "Error hashing password: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
@@ -132,7 +249,7 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	// Начало транзакции
 	tx, err := db.Begin()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error starting transaction: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"message": "Error starting transaction: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
@@ -140,7 +257,7 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow("INSERT INTO users(username, password, cookie) VALUES($1, $2, $3) RETURNING id, created_at", userWithDetails.Username, hashedPassword, cookie).Scan(&userWithDetails.ID, &userWithDetails.CreatedAt)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, fmt.Sprintf("Error inserting user: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"message": "Error inserting user: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
@@ -150,14 +267,14 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 		userWithDetails.Details.UserID, userWithDetails.Details.FirstName, userWithDetails.Details.SecondName, userWithDetails.Details.Email, userWithDetails.Details.PhoneNumber, userWithDetails.Details.Position).Scan(&userWithDetails.Details.ID)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, fmt.Sprintf("Error inserting user details: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"message": "Error inserting user details: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
 	// Подтверждение транзакции
 	err = tx.Commit()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error committing transaction: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"message": "Error committing transaction: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
@@ -165,7 +282,6 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(userWithDetails)
 }
 
-// Обновление информации о пользователе и его деталях
 func UpdateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
 	id, err := strconv.Atoi(params["id"])
@@ -178,6 +294,12 @@ func UpdateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	err = json.NewDecoder(r.Body).Decode(&userWithDetails)
 	if err != nil {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+
+	// Проверка на валидность позиции
+	if !isValidPosition(userWithDetails.Details.Position) {
+		http.Error(w, "Invalid position", http.StatusBadRequest)
 		return
 	}
 
@@ -645,6 +767,20 @@ func CreateMedicine(w http.ResponseWriter, r *http.Request) {
         return
     }
     defer db.Close()
+
+	// Проверка наличия pharmacyID в таблице pharmacies
+    for _, pharmacyID := range medicine.PharmacyIDs {
+        var exists bool
+        err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pharmacies WHERE id = $1)", pharmacyID).Scan(&exists)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Error checking pharmacy existence: %v", err), http.StatusInternalServerError)
+            return
+        }
+        if !exists {
+            http.Error(w, fmt.Sprintf("Pharmacy with ID %d does not exist", pharmacyID), http.StatusBadRequest)
+            return
+        }
+    }
 
     // Вставка лекарства в таблицу medicines
     err = db.QueryRow("INSERT INTO medicines(name, manufacturer, production_date, packaging, price) VALUES($1, $2, $3, $4, $5) RETURNING id",

@@ -14,7 +14,7 @@ services:
     networks:
       - pharmacy-network
     ports:
-      - "5432:5432"
+      - "5432:5432" 
 
   api:
     build: .
