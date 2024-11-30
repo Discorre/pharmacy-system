@@ -10,6 +10,7 @@ services:
       POSTGRES_DB: pharmacy_system
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations/:/docker-entrypoint-initdb.d 
     networks:
       - pharmacy-network
     ports:
@@ -18,6 +19,7 @@ services:
   api:
     build: .
     container_name: pharmacy_api
+    restart: always
     environment:
       DB_HOST: db
       DB_PORT: 5432
@@ -30,6 +32,8 @@ services:
       - "8080:8080"
     networks:
       - pharmacy-network
+    volumes:
+      - ./db/migrations/:/docker-entrypoint-initdb.d 
 
 volumes:
   postgres_data:
