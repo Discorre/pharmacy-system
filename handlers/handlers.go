@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
@@ -50,6 +52,7 @@ type UserWithDetails struct {
 	Password  string        `json:"password"`
 	Cookie	  string    	`json:"cookie"`
 	CreatedAt time.Time     `json:"created_at"`
+	LoginAt   time.Time 	`json:"login_at"`
 	Details   UserDetails   `json:"details"`
 }
 
@@ -72,7 +75,7 @@ type LoginRequest struct {
 // LoginResponse структура для отправки данных клиенту
 type LoginResponse struct {
 	Message string `json:"message"`
-	Token   string `json:"token,omitempty"`
+	Token   string `json:"token"`
 }
 
 
@@ -81,7 +84,8 @@ func EnableCORS(h http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Access-Control-Allow-Origin", "*")
         w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Set-Cookie")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
         if r.Method == "OPTIONS" {
             return
         }
@@ -151,6 +155,14 @@ func LoginUser(w http.ResponseWriter, r *http.Request) {
 
 	var user UserWithDetails
 
+	// Перегенерация UUID
+	newCookie := uuid.New().String()
+	_, err = db.Exec("UPDATE users SET cookie = $1 WHERE username = $2", newCookie, credentials.Username)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error updating user cookie: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// Получение данных пользователя из базы
 	err = db.QueryRow("SELECT u.id, u.username, u.password, u.cookie, ud.position FROM users u JOIN user_details ud ON u.id = ud.user_id WHERE u.username = $1",
 		credentials.Username).Scan(&user.ID, &user.Username, &user.Password, &user.Cookie, &user.Details.Position)
@@ -165,55 +177,97 @@ func LoginUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Сохранение cookie на клиенте
 	http.SetCookie(w, &http.Cookie{
 		Name:     "auth_token",
-		Value:    user.Cookie,
-		HttpOnly: true,
-		Expires:  time.Now().Add(24 * time.Hour),
-	})
+        Value:    user.Cookie,
+        Expires:  time.Now().Add(24 * time.Hour),
+        HttpOnly: true,
+    })
 
 	// Возврат роли и данных пользователя
 	response := map[string]interface{}{
-		"id":       user.ID,
+		"cookie": user.Cookie,
 		"username": user.Username,
 		"position": user.Details.Position,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Auth_token", user.Cookie)
+	json.NewEncoder(w).Encode(response)
+}
+
+func LogoutUser(w http.ResponseWriter, r *http.Request) {
+
+
+	// Получаем токен из заголовков запроса
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "No auth token found", http.StatusUnauthorized)
+		return
+	}
+
+	// Извлекаем токен из заголовка
+	token := strings.Replace(authHeader, "Bearer ", "", 1)
+
+	// Обнуляем cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+	})
+
+	// Обновляем cookie в базе данных (если необходимо)
+	db, err := ConnectToDB()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error connecting to DB: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	_, err = db.Exec("UPDATE users SET cookie = NULL WHERE cookie = $1", token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error updating user cookie: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Возвращаем успешный ответ
+	response := map[string]interface{}{
+		"message": "Logout successful",
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
 func RoleMiddleware(requiredPosition string, handler http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        cookie, err := r.Cookie("auth_token")
-        if err != nil {
-            http.Error(w, `{"message": "Unauthorized"}`, http.StatusUnauthorized)
-            return
-        }
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("auth_token")
+		if err != nil {
+			http.Error(w, `{"message": "Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 
-        db, err := ConnectToDB()
-        if err != nil {
-            http.Error(w, `{"message": "Database error"}`, http.StatusInternalServerError)
-            return
-        }
-        defer db.Close()
+		db, err := ConnectToDB()
+		if err != nil {
+			http.Error(w, `{"message": "Database error"}`, http.StatusInternalServerError)
+			return
+		}
+		defer db.Close()
 
-        var userPosition string
-        err = db.QueryRow("SELECT ud.position FROM users u JOIN user_details ud ON u.id = ud.user_id WHERE u.cookie = $1", cookie.Value).Scan(&userPosition)
-        if err != nil {
-            http.Error(w, `{"message": "Invalid user session"}`, http.StatusUnauthorized)
-            return
-        }
+		var userPosition string
+		err = db.QueryRow("SELECT ud.position FROM users u JOIN user_details ud ON u.id = ud.user_id WHERE u.cookie = $1", cookie.Value).Scan(&userPosition)
+		if err != nil {
+			http.Error(w, `{"message": "Invalid user session"}`, http.StatusUnauthorized)
+			return
+		}
 
-        if userPosition != requiredPosition && (requiredPosition != "Seller" || userPosition != "Buyer") {
-            http.Error(w, `{"message": "Forbidden"}`, http.StatusForbidden)
-            return
-        }
+		if userPosition != requiredPosition && (requiredPosition != "Seller" || userPosition != "Buyer") {
+			http.Error(w, `{"message": "Forbidden"}`, http.StatusForbidden)
+			return
+		}
 
-        handler(w, r)
-    }
+		handler(w, r)
+	}
 }
-
 
 func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 	var userWithDetails UserWithDetails
@@ -283,82 +337,121 @@ func CreateUserWithDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func UpdateUserWithDetails(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	id, err := strconv.Atoi(params["id"])
-	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
-		return
-	}
+    // Получение токена из заголовка Authorization
+    authHeader := r.Header.Get("Authorization")
+    if authHeader == "" {
+        http.Error(w, "Authorization header is missing", http.StatusBadRequest)
+        return
+    }
 
-	var userWithDetails UserWithDetails
-	err = json.NewDecoder(r.Body).Decode(&userWithDetails)
-	if err != nil {
-		http.Error(w, "Invalid input", http.StatusBadRequest)
-		return
-	}
+    // Извлекаем токен из заголовка
+    token := strings.Replace(authHeader, "Bearer ", "", 1)
+    if token == "" {
+        http.Error(w, "Token is missing", http.StatusBadRequest)
+        return
+    }
 
-	// Проверка на валидность позиции
-	if !isValidPosition(userWithDetails.Details.Position) {
-		http.Error(w, "Invalid position", http.StatusBadRequest)
-		return
-	}
+    // Проверка и получение пользователя по токену
+    userID, err := getUserIDFromToken(token)
+    if err != nil {
+        http.Error(w, "Invalid token", http.StatusUnauthorized)
+        return
+    }
 
-	db, err := ConnectToDB()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error connecting to DB: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer db.Close()
+    var userWithDetails UserWithDetails
+    err = json.NewDecoder(r.Body).Decode(&userWithDetails)
+    if err != nil {
+        http.Error(w, "Invalid input", http.StatusBadRequest)
+        return
+    }
 
-	// Хэширование пароля
-	hashedPassword, err := hashPassword(userWithDetails.Password)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error hashing password: %v", err), http.StatusInternalServerError)
-		return
-	}
+    // Проверка на валидность позиции
+    if !isValidPosition(userWithDetails.Details.Position) {
+        http.Error(w, "Invalid position", http.StatusBadRequest)
+        return
+    }
 
-	// Начало транзакции
-	tx, err := db.Begin()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error starting transaction: %v", err), http.StatusInternalServerError)
-		return
-	}
+    db, err := ConnectToDB()
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error connecting to DB: %v", err), http.StatusInternalServerError)
+        return
+    }
+    defer db.Close()
 
-	// Обновление пользователя
-	_, err = tx.Exec("UPDATE users SET username = $1, password = $2 WHERE id = $3", userWithDetails.Username, hashedPassword, id)
-	if err != nil {
-		tx.Rollback()
-		http.Error(w, fmt.Sprintf("Error updating user: %v", err), http.StatusInternalServerError)
-		return
-	}
+    // Хэширование пароля
+    hashedPassword, err := hashPassword(userWithDetails.Password)
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error hashing password: %v", err), http.StatusInternalServerError)
+        return
+    }
 
-	// Обновление деталей пользователя
-	_, err = tx.Exec("UPDATE user_details SET first_name = $1, second_name = $2, email = $3, phone_number = $4, position = $5 WHERE user_id = $6",
-		userWithDetails.Details.FirstName, userWithDetails.Details.SecondName, userWithDetails.Details.Email, userWithDetails.Details.PhoneNumber, userWithDetails.Details.Position, id)
-	if err != nil {
-		tx.Rollback()
-		http.Error(w, fmt.Sprintf("Error updating user details: %v", err), http.StatusInternalServerError)
-		return
-	}
+    // Начало транзакции
+    tx, err := db.Begin()
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error starting transaction: %v", err), http.StatusInternalServerError)
+        return
+    }
 
-	// Подтверждение транзакции
-	err = tx.Commit()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error committing transaction: %v", err), http.StatusInternalServerError)
-		return
-	}
+    // Обновление пользователя
+    _, err = tx.Exec("UPDATE users SET username = $1, password = $2 WHERE id = $3", userWithDetails.Username, hashedPassword, userID)
+    if err != nil {
+        tx.Rollback()
+        http.Error(w, fmt.Sprintf("Error updating user: %v", err), http.StatusInternalServerError)
+        return
+    }
 
-	userWithDetails.ID = id
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(userWithDetails)
+    // Обновление деталей пользователя
+    _, err = tx.Exec("UPDATE user_details SET first_name = $1, second_name = $2, email = $3, phone_number = $4, position = $5 WHERE user_id = $6",
+        userWithDetails.Details.FirstName, userWithDetails.Details.SecondName, userWithDetails.Details.Email, userWithDetails.Details.PhoneNumber, userWithDetails.Details.Position, userID)
+    if err != nil {
+        tx.Rollback()
+        http.Error(w, fmt.Sprintf("Error updating user details: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    // Подтверждение транзакции
+    err = tx.Commit()
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error committing transaction: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    userWithDetails.ID = userID
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(userWithDetails)
 }
 
-// Получение пользователя и его деталей по ID
-func GetUserWithDetailsByID(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	id, err := strconv.Atoi(params["id"])
-	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
+func getUserIDFromToken(token string) (int, error) {
+    db, err := ConnectToDB()
+    if err != nil {
+        return 0, fmt.Errorf("error connecting to DB: %v", err)
+    }
+    defer db.Close()
+
+    var userID int
+    err = db.QueryRow("SELECT id FROM users WHERE cookie = $1", token).Scan(&userID)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return 0, fmt.Errorf("invalid token")
+        }
+        return 0, fmt.Errorf("error querying DB: %v", err)
+    }
+
+    return userID, nil
+}
+
+func GetUserWithDetailsByCookie(w http.ResponseWriter, r *http.Request) {
+	// Извлекаем токен из заголовка Authorization
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "Authorization header is missing", http.StatusBadRequest)
+		return
+	}
+
+	// Извлекаем токен из заголовка
+	token := strings.Replace(authHeader, "Bearer ", "", 1)
+	if token == "" {
+		http.Error(w, "Token is missing", http.StatusBadRequest)
 		return
 	}
 
@@ -370,13 +463,15 @@ func GetUserWithDetailsByID(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 
 	var userWithDetails UserWithDetails
-	err = db.QueryRow("SELECT id, username, created_at FROM users WHERE id = $1", id).Scan(&userWithDetails.ID, &userWithDetails.Username, &userWithDetails.CreatedAt)
+	// Ищем пользователя по токену
+	err = db.QueryRow("SELECT id, username, created_at FROM users WHERE cookie = $1", token).Scan(&userWithDetails.ID, &userWithDetails.Username, &userWithDetails.CreatedAt)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error fetching user: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	err = db.QueryRow("SELECT id, user_id, first_name, second_name, email, phone_number, position FROM user_details WHERE user_id = $1", id).Scan(
+	// Получаем детали пользователя по user_id
+	err = db.QueryRow("SELECT id, user_id, first_name, second_name, email, phone_number, position FROM user_details WHERE user_id = $1", userWithDetails.ID).Scan(
 		&userWithDetails.Details.ID, &userWithDetails.Details.UserID, &userWithDetails.Details.FirstName, &userWithDetails.Details.SecondName, &userWithDetails.Details.Email, &userWithDetails.Details.PhoneNumber, &userWithDetails.Details.Position)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error fetching user details: %v", err), http.StatusInternalServerError)

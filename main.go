@@ -35,20 +35,21 @@ func main() {
 	r.HandleFunc("/api/pharmacies/{id:[0-9]+}", handlers.DeletePharmacy).Methods("DELETE")
 
 	r.HandleFunc("/api/medicines", handlers.GetMedicines).Methods("GET")
-	r.HandleFunc("/api/medicines/{Aid:[0-9]+}", handlers.GetMedicineByID).Methods("GET")
+	r.HandleFunc("/api/medicines/{id:[0-9]+}", handlers.GetMedicineByID).Methods("GET")
 	r.HandleFunc("/api/medicines", handlers.CreateMedicine).Methods("POST")
 	r.HandleFunc("/api/medicines/{id:[0-9]+}", handlers.UpdateMedicine).Methods("PUT")
 	r.HandleFunc("/api/medicines/{id:[0-9]+}", handlers.DeleteMedicine).Methods("DELETE")
 
 	// Маршруты для пользователей
 	r.HandleFunc("/api/users", handlers.CreateUserWithDetails).Methods("POST")
-	r.HandleFunc("/api/users/{id}", handlers.UpdateUserWithDetails).Methods("PUT")
-	r.HandleFunc("/api/users/{id}", handlers.GetUserWithDetailsByID).Methods("GET")
+	r.HandleFunc("/api/user/details", handlers.UpdateUserWithDetails).Methods("PUT")
+	r.HandleFunc("/api/user/details", handlers.GetUserWithDetailsByCookie).Methods("GET")
 	r.HandleFunc("/api/users/{id}", handlers.DeleteUserWithDetails).Methods("DELETE")
 	r.HandleFunc("/api/users", handlers.GetAllUsersWithDetails).Methods("GET")
 
 	// Маршруты для аутентификации и авторизации
 	r.HandleFunc("/api/users/login", handlers.LoginUser).Methods("POST")
+	r.HandleFunc("api/users/logout", handlers.LogoutUser).Methods("PUT")
 
 	// Доступ к таблицам аптек и лекарств
 	r.HandleFunc("/api/pharmacies", handlers.RoleMiddleware("Seller", handlers.GetPharmacies)).Methods("GET")
